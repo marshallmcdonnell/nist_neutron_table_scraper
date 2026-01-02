@@ -21,7 +21,7 @@ class ElementData(BaseModel):
 
 #======== Scraper =======
 
-TIMEOUT=0.5
+TIMEOUT=0.75
 COLUMNS_PER_ROW = 8
 
 
@@ -31,30 +31,26 @@ base_url = "https://www.ncnr.nist.gov/resources/n-lengths/elements/"
 # Function to get the list of element links from the master page
 def get_element_links():
     response = requests.get(base_url, timeout=TIMEOUT)
-    print(response.status_code)
-    
+
     if response.status_code != 200:
         print(f"Failed to retrieve the master page. Status code: {response.status_code}")
         return []
-    
-    print("Successfully retrieved the master page.")
+
     soup = BeautifulSoup(response.content, "html.parser")
-    
+
     # Find all links to element pages
     # From inspecting the page, we know they are in <a> tags with 'href' attributes
     links = soup.find_all("a", href=True)
-    
+
     # Filter out any links that don't correspond to element pages (e.g., excluding non-element links)
     element_links = [link['href'] for link in links if link['href'].endswith('.html')]
-    
+
     return element_links
 
 def clean_isotope_data(data_row) -> list[Union[str, float, None]]:
-    print('before', data_row)
 
     # Have to use this for loop to modify list in place
     for i in range(len(data_row)):
-        print(data_row[i])
 
         # Change concentrations of form (18.10 a) to just 18.10
         if 'a' in data_row[i]:
@@ -72,8 +68,6 @@ def clean_isotope_data(data_row) -> list[Union[str, float, None]]:
             continue
 
         # Remove leading '(+/-)' if present
-        print(data_row[i][0:5])
-        print(data_row[i][0:5] == "(+/-)")
         if data_row[i][0:5] == "(+/-)":
             data_row[i] = data_row[i][5:]
 
@@ -89,18 +83,13 @@ def clean_isotope_data(data_row) -> list[Union[str, float, None]]:
         if '(' in data_row[i]:
             data_row[i] = data_row[i].split('(')[0]
 
-        print(data_row[i])
-
         # Drop complex component if present (i.e. 1.234-0.567i -> 1.234)
         if 'i' in data_row[i] and i != 0:
             complex_value = complex(data_row[i].replace('i','j'))
             data_row[i] = complex_value.real
 
-        print(data_row[i])
-
         data_row[i] = float(data_row[i]) if i != 0 else data_row[i]  # First column is isotope name
 
-    print('after', data_row)
     return data_row
 
 # Function to scrape the "scatt xs" value for each element page
@@ -108,11 +97,11 @@ def scrape_scatt_xs(element_link) -> ElementData | None:
     url = base_url + element_link
     print(f"Scraping URL: {url}")
     response = requests.get(url, timeout=TIMEOUT)
-    
+
     if response.status_code != 200:
         print(f"Failed to retrieve {element_link}. Status code: {response.status_code}")
         return None
-    
+
     soup = BeautifulSoup(response.content, "html.parser")
     #scatt_xs = soup.find(string=lambda text: "scatt xs" in text.lower())
     #scatt_xs = soup.find(text="Scatt xs").find_next("td").text.strip()
@@ -130,16 +119,11 @@ def scrape_scatt_xs(element_link) -> ElementData | None:
             continue
 
         isotope_table = tds[0].text.strip()
-        print(isotope_table)
-        print('----')
 
         # Check for values that look like (7.37E3 a) and don't split over the space between number and 'a'
         if '(a)' in isotope_table or ' a' in isotope_table:
             isotope_table = isotope_table.replace('(a)','').replace(' a','')
-        print(isotope_table)
         data = isotope_table.split()
-        print(data)
-        print(type(data))
 
         # Create element model to hold isotope data
         element_data = ElementData(
@@ -148,10 +132,8 @@ def scrape_scatt_xs(element_link) -> ElementData | None:
             isotopes=[],
         )
 
-        print("*** Data length: ", len(data))
         # Loop over each isotope (8 columns per isotope)
         for i in range(0, len(data), COLUMNS_PER_ROW):
-            print("*** Data i: ", i, data[0:i+COLUMNS_PER_ROW])
 
             isotope_data = clean_isotope_data(data[i:i+COLUMNS_PER_ROW])
 
@@ -174,14 +156,59 @@ def scrape_scatt_xs(element_link) -> ElementData | None:
 
     return element_data
 
+
+def format_row(key, values):
+    nums = []
+    for v in values:
+        if v is None:
+            nums.append(f"{'null':>10}")
+        elif isinstance(v, float):
+            nums.append(f"{v:10.6f}")
+        else:
+            nums.append(f"{str(v):>10}")
+
+    return f"{key:5} : [ " + ", ".join(nums) + " ]"
+
+
 print("Scraping scattering cross-section values from NIST...")
 element_links = get_element_links()
 print("Found elements:", element_links)
 
 # Loop through all elements and print their "scatt xs" values
-for element in element_links:
 
-    print(f"Processing element link: {element}")
-    element_data= scrape_scatt_xs(element)
-    if element_data:
-        print(json.dumps(element_data.dict(), indent=2))
+with open("out.yaml", "w") as f:
+
+    f.write(
+        "# "
+        "abundance "
+        "Coh_b (n) "
+        "Incoh_b (n) "
+        "Coh_xs (n) "
+        "Incoh_xs (n) "
+        "Scatt_xs (n) "
+        "Abs_xs (n) "
+        "\n"
+    )
+
+    for element in element_links:
+
+        print(f"Processing element link: {element}")
+        element_data= scrape_scatt_xs(element)
+        if element_data:
+            print(json.dumps(element_data.dict(), indent=2))
+
+            for iso in element_data.isotopes:
+                f.write(
+                    format_row(
+                        iso.isotope,
+                        [
+                            iso.abundance,
+                            iso.coh_b,
+                            iso.incoh_b,
+                            iso.coh_xs,
+                            iso.incoh_xs,
+                            iso.scatt_xs,
+                            iso.abs_xs,
+                        ],
+                    ) + "\n"
+                )
